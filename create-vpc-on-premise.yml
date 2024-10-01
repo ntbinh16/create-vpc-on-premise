@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "VPC template for simulated on-prem environment"
+
+Parameters:
+  OnPremVpcCidr:
+    AllowedPattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\/(1[6-9]|2[0-8]))$"
+    ConstraintDescription: CIDR block parameter must be in the form x.x.x.x/16-28
+    Default: 172.16.0.0/16
+    Description: CIDR block for the VPC
+    Type: String
+  OnPremPublicSubnetCidr:
+    AllowedPattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\/(1[6-9]|2[0-8]))$"
+    ConstraintDescription: CIDR block parameter must be in the form x.x.x.x/16-28
+    Default: 172.16.0.0/24
+    Description: CIDR block for Public subnet
+    Type: String
+  OnPremPrivateSubnetCidr:
+    AllowedPattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\/(1[6-9]|2[0-8]))$"
+    ConstraintDescription: CIDR block parameter must be in the form x.x.x.x/16-28
+    Default: 172.16.1.0/24
+    Description: CIDR block for Private subnet
+    Type: String
+  AMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: 'The ID of the AMI'
+    Default: "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+
+Resources:
+  # Data center resources
+  OnPremVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref OnPremVpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: "VPC On Premises"
+
+  OnPremPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: !Ref OnPremPublicSubnetCidr
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref OnPremVpc
+      Tags:
+        - Key: Name
+          Value:  "On-Premises Public Subnet"
+
+  OnPremInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: "On-Premises IGW"
+
+  OnPremAttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    DependsOn:
+      - OnPremInternetGateway
+      - OnPremVpc
+    Properties:
+      InternetGatewayId: !Ref OnPremInternetGateway
+      VpcId: !Ref OnPremVpc
+
+  OnPremPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OnPremVpc
+      Tags:
+        - Key: Name
+          Value: "On-Premises Public Route Table"
+          
+  OnPremPublicRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref OnPremPublicSubnet
+      RouteTableId: !Ref OnPremPublicRouteTable
+          
+  OnPremPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - OnPremAttachInternetGateway
+    Properties:
+      RouteTableId: !Ref OnPremPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref OnPremInternetGateway
+
+  OnPremPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: !Ref OnPremPrivateSubnetCidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref OnPremVpc
+      Tags:
+        - Key: Name
+          Value: "On-Premises Private Subnet"
+          
+  OnPremNatEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  OnPremNatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: OnPremAttachInternetGateway
+    Properties:
+      AllocationId: !GetAtt OnPremNatEIP.AllocationId
+      SubnetId: !Ref OnPremPublicSubnet
+      Tags:
+        - Key: Name
+          Value: "On-Premises NATGW"
+
+  OnPremPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: "On-Premises Private Route Table"
+      VpcId: !Ref OnPremVpc
+
+  OnPremPrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref OnPremPrivateRouteTable
+      SubnetId: !Ref OnPremPrivateSubnet
+
+  OnPremPrivateRouteNat:
+    Type: AWS::EC2::Route
+    DependsOn: 
+      - OnPremNatGateway
+      - OnPremPrivateRouteTable
+    Properties:
+      RouteTableId: !Ref OnPremPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref OnPremNatGateway
+
+  OnPremCustomerGatewayServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Customer Gateway Server
+      GroupName: "On-Premises Customer Gateway Security Group"
+      VpcId: !Ref OnPremVpc
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          CidrIp: 10.0.0.0/8
+          FromPort: "-1"
+          ToPort: "-1"
+        - IpProtocol: icmp
+          CidrIp: 172.16.0.0/16
+          FromPort: "-1"
+          ToPort: "-1"      
+
+  OnPremCustomerGatewayServer:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - OnPremPublicRoute
+    Properties:
+      IamInstanceProfile: "SSM-Role"
+      ImageId: !Ref AMI
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - !Ref OnPremCustomerGatewayServerSecurityGroup
+      SourceDestCheck: false
+      SubnetId: !Ref OnPremPublicSubnet
+      Tags:
+        - Key: Name
+          Value: "On-Premises Customer Gateway"
+
+Outputs:
+  OnPremVpc:
+    Value: !Ref OnPremVpc
+  OnPremVpcCidr:
+    Value: !Ref OnPremVpcCidr
+  OnPremPublicSubnet:
+    Value: !Ref OnPremPublicSubnet
+  OnPremPrivateSubnet:
+    Value: !Ref OnPremPrivateSubnet
+  PublicIp:
+    Value: !GetAtt OnPremCustomerGatewayServer.PublicIp
